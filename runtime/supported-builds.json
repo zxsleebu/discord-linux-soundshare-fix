@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "builds": {
+    "d219e2bb8ed1ed7abb95f4de41e79f125b9425f6f9953c3733735f93f4d18de8": {
+      "label": "Discord Stable 1.0.156",
+      "channel": "stable",
+      "appVersion": "1.0.156",
+      "platform": "linux-x64",
+      "signalOnSoundshareOffset": "0x3bf110"
+    }
+  }
+}

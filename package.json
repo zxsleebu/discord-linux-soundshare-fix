@@ -1,0 +1,31 @@
+{
+  "name": "discord-linux-soundshare-fix",
+  "version": "0.1.0",
+  "description": "Prevents Discord screen-share audio restarts when PulseAudio/PipeWire nodes appear on Linux.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "discord-soundshare-fix": "./bin/discord-soundshare-fix.mjs"
+  },
+  "scripts": {
+    "build": "node-gyp rebuild --directory native",
+    "check": "node --check bin/discord-soundshare-fix.mjs && node --check lib/installer.mjs && node --check runtime/register.cjs",
+    "test": "node --test",
+    "verify": "npm run check && npm test && npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zxsleebu/discord-linux-soundshare-fix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zxsleebu/discord-linux-soundshare-fix/issues"
+  },
+  "homepage": "https://github.com/zxsleebu/discord-linux-soundshare-fix#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "node-gyp": "13.0.2"
+  }
+}

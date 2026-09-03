@@ -1,0 +1,6 @@
+node_modules/
+native/build/
+dist/
+*.log
+*.i64
+discord_voice.node

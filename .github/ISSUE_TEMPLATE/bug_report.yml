@@ -1,0 +1,35 @@
+name: Bug report
+description: Report an installation or runtime problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please do not upload Discord binaries, tokens, or private logs.
+  - type: textarea
+    id: status
+    attributes:
+      label: Status output
+      description: Paste the output of `node ./bin/discord-soundshare-fix.mjs status`.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Linux distribution
+    validations:
+      required: true
+  - type: dropdown
+    id: discord-channel
+    attributes:
+      label: Discord channel
+      options: [Stable, Canary, PTB, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+    validations:
+      required: true

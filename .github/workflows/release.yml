@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - name: Package Linux x86_64 release
+        run: |
+          mkdir -p release/discord-linux-soundshare-fix/{bin,lib,runtime,dist}
+          cp bin/discord-soundshare-fix.mjs release/discord-linux-soundshare-fix/bin/
+          cp lib/installer.mjs release/discord-linux-soundshare-fix/lib/
+          cp runtime/register.cjs runtime/supported-builds.json release/discord-linux-soundshare-fix/runtime/
+          cp native/build/Release/discord_soundshare_fix.node release/discord-linux-soundshare-fix/dist/
+          cp README.md LICENSE package.json release/discord-linux-soundshare-fix/
+          chmod +x release/discord-linux-soundshare-fix/bin/discord-soundshare-fix.mjs
+          tar -C release -czf discord-linux-soundshare-fix-linux-x64.tar.gz discord-linux-soundshare-fix
+          sha256sum discord-linux-soundshare-fix-linux-x64.tar.gz > checksums.sha256
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" discord-linux-soundshare-fix-linux-x64.tar.gz checksums.sha256 --generate-notes --verify-tag
