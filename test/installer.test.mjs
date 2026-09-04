@@ -8,11 +8,18 @@ import {
   BACKUP_FILE,
   MARKER_START,
   PAYLOAD_DIRECTORY,
+  PRELOAD_DESKTOP_MARKER,
+  PRELOAD_LIBRARY_FILE,
   discoverInstalls,
+  inspectPreloadInstallation,
   injectPatch,
+  installPreload,
   installTarget,
+  makePreloadLauncher,
+  patchDesktopEntry,
   sha256File,
   targetFromPath,
+  uninstallPreload,
   uninstallTarget,
 } from "../lib/installer.mjs";
 
@@ -134,4 +141,76 @@ test("discovery selects the newest app directory per channel", async (t) => {
   assert.equal(targets.length, 1);
   assert.equal(targets[0].channel, "stable");
   assert.equal(targets[0].appVersion, "1.0.156");
+});
+
+test("desktop override keeps the app identity and wraps every launch command", () => {
+  const source = `[Desktop Entry]
+Name=Discord
+Exec=/usr/bin/discord --url -- %u
+Icon=discord
+StartupWMClass=discord
+
+[Desktop Action Quit]
+Exec=/usr/bin/discord --quit
+`;
+  const patched = patchDesktopEntry(source, "/home/test/.local/share/discord-soundshare-fix/launch");
+  assert.match(patched, new RegExp(`^${PRELOAD_DESKTOP_MARKER}`, "m"));
+  assert.match(patched, /^Name=Discord$/m);
+  assert.match(patched, /^Icon=discord$/m);
+  assert.match(patched, /^StartupWMClass=discord$/m);
+  assert.equal((patched.match(/^Exec=.*discord-soundshare-fix\/launch.*\/usr\/bin\/discord/gm) ?? []).length, 2);
+});
+
+test("preload launcher preserves an existing LD_PRELOAD value", () => {
+  const script = makePreloadLauncher("/home/test/lib fix.so");
+  assert.match(script, /fix_library='\/home\/test\/lib fix\.so'/);
+  assert.match(script, /LD_PRELOAD/);
+  assert.match(script, /exec "\$@"/);
+});
+
+test("transparent preload install is idempotent and uninstall restores user overrides", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "discord-soundshare-preload-test-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataHome = path.join(root, "user-data");
+  const systemData = path.join(root, "system-data");
+  const applications = path.join(dataHome, "applications");
+  const systemApplications = path.join(systemData, "applications");
+  const autostartDirectory = path.join(root, ".config", "autostart");
+  const library = path.join(root, PRELOAD_LIBRARY_FILE);
+  const stableDesktop = `[Desktop Entry]\nName=Discord\nExec=/usr/bin/discord --url -- %u\nIcon=discord\n`;
+  const canaryDesktop = `[Desktop Entry]\nName=Discord Canary\nExec=/usr/bin/discord-canary\nIcon=discord-canary\n`;
+  const stableAutostart = `[Desktop Entry]\nName=Discord\nExec=/opt/discord/Discord\nIcon=discord\n`;
+  await fs.mkdir(applications, { recursive: true });
+  await fs.mkdir(systemApplications, { recursive: true });
+  await fs.mkdir(autostartDirectory, { recursive: true });
+  await fs.writeFile(path.join(systemApplications, "discord.desktop"), stableDesktop);
+  await fs.writeFile(path.join(applications, "discord-canary.desktop"), canaryDesktop);
+  await fs.writeFile(path.join(autostartDirectory, "discord.desktop"), stableAutostart);
+  await fs.writeFile(library, "fake preload library");
+
+  const options = {
+    channels: ["stable", "canary"],
+    homeDirectory: root,
+    dataHome,
+    systemDataDirectories: [systemData],
+    preloadLibraryPath: library,
+  };
+  const first = await installPreload(options);
+  assert.deepEqual(first.entries.map((entry) => entry.channel), ["canary", "stable", "stable"]);
+  assert.equal((await inspectPreloadInstallation({ homeDirectory: root, dataHome })).installed, true);
+  assert.match(await fs.readFile(path.join(applications, "discord.desktop"), "utf8"), /discord-soundshare-fix:preload/);
+  assert.match(await fs.readFile(path.join(applications, "discord-canary.desktop"), "utf8"), /discord-soundshare-fix:preload/);
+  assert.match(await fs.readFile(path.join(autostartDirectory, "discord.desktop"), "utf8"), /discord-soundshare-fix:preload/);
+
+  await installPreload(options);
+  const removedStable = await uninstallPreload({ channels: ["stable"], homeDirectory: root, dataHome });
+  assert.equal(removedStable.length, 2);
+  await assert.rejects(fs.access(path.join(applications, "discord.desktop")));
+  assert.equal(await fs.readFile(path.join(autostartDirectory, "discord.desktop"), "utf8"), stableAutostart);
+  assert.match(await fs.readFile(path.join(applications, "discord-canary.desktop"), "utf8"), /discord-soundshare-fix:preload/);
+
+  const removedCanary = await uninstallPreload({ channels: ["canary"], homeDirectory: root, dataHome });
+  assert.equal(removedCanary.length, 1);
+  assert.equal(await fs.readFile(path.join(applications, "discord-canary.desktop"), "utf8"), canaryDesktop);
+  await assert.rejects(fs.access(path.join(dataHome, PAYLOAD_DIRECTORY)));
 });

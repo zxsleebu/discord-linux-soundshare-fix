@@ -25,8 +25,10 @@ jobs:
           cp lib/installer.mjs release/discord-linux-soundshare-fix/lib/
           cp runtime/register.cjs runtime/supported-builds.json release/discord-linux-soundshare-fix/runtime/
           cp native/build/Release/discord_soundshare_fix.node release/discord-linux-soundshare-fix/dist/
-          cp README.md LICENSE package.json release/discord-linux-soundshare-fix/
-          chmod +x release/discord-linux-soundshare-fix/bin/discord-soundshare-fix.mjs
+          cp native/build/Release/discord_soundshare_fix_preload.so release/discord-linux-soundshare-fix/dist/libdiscord_soundshare_fix_preload.so
+          cp native/build/Release/discord_soundshare_fix_inspect release/discord-linux-soundshare-fix/dist/
+          cp install.sh README.md LICENSE package.json release/discord-linux-soundshare-fix/
+          chmod +x release/discord-linux-soundshare-fix/install.sh release/discord-linux-soundshare-fix/bin/discord-soundshare-fix.mjs release/discord-linux-soundshare-fix/dist/discord_soundshare_fix_inspect
           tar -C release -czf discord-linux-soundshare-fix-linux-x64.tar.gz discord-linux-soundshare-fix
           sha256sum discord-linux-soundshare-fix-linux-x64.tar.gz > checksums.sha256
       - name: Publish GitHub release
