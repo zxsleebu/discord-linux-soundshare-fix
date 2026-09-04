@@ -131,19 +131,6 @@ Release archives also contain an offline compatibility inspector:
   ~/.config/discord/app-*/modules/discord_voice-*/discord_voice/discord_voice.node
 ```
 
-## Migrating from v0.1
-
-The old v0.1 loader modified Discord's `index.js`. Remove it first using its
-exact backup, then install the transparent preload:
-
-```bash
-node ./bin/discord-soundshare-fix.mjs legacy-uninstall --all
-./install.sh
-```
-
-Legacy commands remain available in v0.2 so existing installations can be
-restored safely.
-
 ## Safety model
 
 - The Discord binary and `discord_voice.node` are never modified or
