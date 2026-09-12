@@ -20,6 +20,8 @@ in-app indicator below adds a backed-up JavaScript loader.
 
 ## Optional in-app indicator
 
+![Soundshare Fix indicator on Discord's screen-share button, showing a verified active hook and blocked duplicate restarts](docs/images/soundshare-indicator.png)
+
 After building and installing the preload fix, enable the indicator for your client:
 
 ```bash
