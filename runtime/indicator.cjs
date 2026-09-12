@@ -5,7 +5,7 @@
 const LABELS = new Set([
   "Stop Streaming", "Share Your Screen", "Share Screen", "Start Streaming",
   "Остановить трансляцию", "Демонстрация экрана", "Продемонстрировать экран",
-]);
+].map((label) => label.toLocaleLowerCase()));
 const COLORS = { active: "#43d9a3", waiting: "#f0c35a", error: "#f57983", unknown: "#a6adba" };
 
 function describeStatus(status) {
@@ -28,7 +28,35 @@ function describeStatus(status) {
 }
 
 function isShareButton(button) {
-  return LABELS.has(button.getAttribute("aria-label") ?? "");
+  const labelledBy = button.getAttribute("aria-labelledby");
+  const referenced = labelledBy && button.ownerDocument
+    ? labelledBy.split(/\s+/).map((id) => button.ownerDocument.getElementById(id)?.textContent ?? "").join(" ")
+    : "";
+  const label = referenced || button.getAttribute("aria-label") || button.getAttribute("title") || "";
+  const matches = (text) => LABELS.has(text.trim().replace(/\s+/g, " ").toLocaleLowerCase());
+  if (label) return matches(label);
+  // Discord's compact voice panel uses a hidden description as its button label.
+  // Ignore our own appended tooltip so subsequent refreshes still recognize it.
+  const description = (button.getAttribute("aria-describedby") ?? "").split(/\s+/)
+    .map((id) => button.ownerDocument?.getElementById(id))
+    .filter((element) => element && element.dataset.soundshareFixTooltip !== "true")
+    .map((element) => element.textContent ?? "").join(" ");
+  return matches(description);
+}
+
+function findShareButtons(document) {
+  const buttons = new Set();
+  for (const element of document.querySelectorAll('[aria-label], [aria-labelledby], [aria-describedby], [title]')) {
+    if (!isShareButton(element)) continue;
+    const button = element.closest('button, [role="button"]');
+    if (button) buttons.add(button);
+    else {
+      // A tooltip wrapper may label exactly one nested control.
+      const nested = element.querySelectorAll('button, [role="button"]');
+      if (nested.length === 1) buttons.add(nested[0]);
+    }
+  }
+  return buttons;
 }
 
 function mountIndicator({ document, window, readStatus }) {
@@ -72,9 +100,11 @@ function mountIndicator({ document, window, readStatus }) {
     if (positionChanged) button.style.position = "relative";
     dot.style.cssText = "position:absolute;right:2px;top:3px;width:7px;height:7px;box-sizing:content-box;border:2px solid #20242b;border-radius:50%;pointer-events:none;";
     const tooltip = document.createElement("div");
+    tooltip.dataset.soundshareFixTooltip = "true";
     tooltip.id = `soundshare-fix-status-${++sequence}`;
     tooltip.setAttribute("role", "tooltip");
-    tooltip.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;z-index:1001;max-width:304px;padding:9px 12px;border:1px solid #ffffff18;border-radius:9px;background:#17191f;color:#eceef2;box-shadow:0 5px 18px #0005;font:12px/1.6 var(--font-primary,system-ui);white-space:pre-line;";
+    // Discord mounts its native tooltips in a high-z-index overlay layer.
+    tooltip.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;z-index:2147483647;max-width:304px;padding:9px 12px;border:1px solid #ffffff18;border-radius:9px;background:#17191f;color:#eceef2;box-shadow:0 5px 18px #0005;font:12px/1.6 var(--font-primary,system-ui);white-space:pre-line;";
     button.append(dot);
     document.body.append(tooltip);
     const oldDescription = button.getAttribute("aria-describedby");
@@ -99,7 +129,7 @@ function mountIndicator({ document, window, readStatus }) {
     let status;
     try { status = readStatus(); } catch { status = null; }
     const view = describeStatus(status);
-    const buttons = new Set([...document.querySelectorAll('button[aria-label], [role="button"][aria-label]')].filter(isShareButton));
+    const buttons = findShareButtons(document);
     for (const [button, record] of records) if (!buttons.has(button)) remove(button, record);
     for (const button of buttons) {
       const record = records.get(button) ?? create(button);
