@@ -9,7 +9,13 @@ import {
   targetFromPath,
   uninstallPreload,
   uninstallTarget,
+  refreshPreloadLibrary,
 } from "../lib/installer.mjs";
+import { installIndicator, inspectIndicator, uninstallIndicator } from "../lib/indicator-installer.mjs";
+import { installMaintenance, inspectMaintenance, uninstallMaintenance, SERVICE_NAME } from "../lib/maintenance.mjs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const exec = promisify(execFile);
 
 const CHANNELS = new Set(["stable", "canary", "ptb"]);
 
@@ -19,10 +25,17 @@ Usage:
   discord-soundshare-fix status
   discord-soundshare-fix install [--channel stable|canary|ptb]
   discord-soundshare-fix uninstall [--channel stable|canary|ptb]
+  discord-soundshare-fix indicator-install [--channel stable|canary|ptb]
+  discord-soundshare-fix indicator-status [--channel stable|canary|ptb]
+  discord-soundshare-fix indicator-uninstall [--channel stable|canary|ptb]
+  discord-soundshare-fix maintenance-install [--channel stable|canary|ptb]
+  discord-soundshare-fix maintenance-status
+  discord-soundshare-fix maintenance-uninstall
 
 The default installer creates a transparent XDG desktop override. It keeps the
 same Discord icon and starts the real client with the in-memory LD_PRELOAD hook.
 Discord files are not modified.
+Optional indicator/maintenance commands add a backed-up JavaScript loader.
 
 Legacy v0.1 commands:
   discord-soundshare-fix legacy-status [--channel NAME] [--path DIR]
@@ -111,6 +124,52 @@ async function main() {
     await runLegacy(options);
     return;
   }
+  if (options.command.startsWith("indicator-")) {
+    if (!["indicator-install", "indicator-status", "indicator-uninstall"].includes(options.command)) throw new Error("Unknown indicator command");
+    if (options.customPath || options.all) throw new Error("Use --channel for the indicator");
+    const targets = (await discoverInstalls()).filter((target) => !options.channel || target.channel === options.channel);
+    if (!targets.length) throw new Error("No matching Discord installation found");
+    if (options.command === "indicator-uninstall" && (await inspectMaintenance()).files.length) {
+      throw new Error("Run maintenance-uninstall first, otherwise automatic repair would reinstall the indicator");
+    }
+    if (options.command === "indicator-install") await refreshPreloadLibrary();
+    for (const target of targets) {
+      if (options.command === "indicator-install") {
+        console.log(`Indicator installed: ${await installIndicator(target)}`);
+      } else if (options.command === "indicator-uninstall") {
+        console.log(`${target.channel}: ${await uninstallIndicator(target) ? "indicator removed" : "not installed"}`);
+      } else {
+        console.log(`${target.channel} ${target.appVersion}: ${(await inspectIndicator(target)).reason}`);
+      }
+    }
+    if (options.command !== "indicator-status") console.log("Fully quit Discord and restart from the usual icon. The running client is unchanged.");
+    return;
+  }
+  if (options.command.startsWith("maintenance-")) {
+    if (options.customPath || options.all) throw new Error("Use --channel for maintenance installation");
+    if (options.command === "maintenance-install") {
+      const config = await installMaintenance({ channels: options.channel ? [options.channel] : ["stable"] });
+      await exec("systemctl", ["--user", "daemon-reload"]);
+      await exec("systemctl", ["--user", "enable", "--now", SERVICE_NAME]);
+      console.log(`Maintenance enabled for ${config.channels.join(", ")}; running Discord was not restarted.`);
+      for (const guard of config.guards) console.log(`Autostart protected: ${guard.unit}`);
+    } else if (options.command === "maintenance-status") {
+      const status = await inspectMaintenance();
+      console.log(`Maintenance files: ${status.installed ? "ready" : "not installed or changed"}`);
+      for (const file of status.files) console.log(`  ${file.valid ? "ready" : "changed"} ${file.path}`);
+      if (status.checkedAt) console.log(`Last check: ${status.checkedAt}`);
+      for (const diagnostic of status.diagnostics ?? []) console.log(`  ${diagnostic}`);
+      const runtime = await exec("systemctl", ["--user", "show", SERVICE_NAME, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState"]).catch(() => ({ stdout: "systemd status unavailable\n" }));
+      console.log(runtime.stdout.trim());
+    } else if (options.command === "maintenance-uninstall") {
+      if (options.channel) throw new Error("Maintenance uninstall removes the entire maintenance service");
+      await exec("systemctl", ["--user", "disable", "--now", SERVICE_NAME]);
+      const removed = await uninstallMaintenance();
+      await exec("systemctl", ["--user", "daemon-reload"]);
+      console.log(removed ? "Maintenance removed; original launcher restored. Audio fix and indicator remain installed." : "Maintenance was not installed.");
+    } else throw new Error("Unknown maintenance command");
+    return;
+  }
   if (!new Set(["status", "install", "uninstall"]).has(options.command)) {
     throw new Error(`Unknown command: ${options.command}`);
   }
@@ -126,7 +185,7 @@ async function main() {
     }
     console.log(`Transparent preload: ${status.installed ? "installed" : "needs repair"}`);
     for (const entry of status.entries) {
-      console.log(`  ${entry.channel.padEnd(7)} ${(entry.kind ?? "application").padEnd(11)} ${entry.valid ? "ready" : "changed"}  ${entry.destinationPath}`);
+      console.log(`  ${entry.channel.padEnd(7)} ${(entry.kind ?? "application").padEnd(11)} ${entry.guarded ? "systemd guarded" : entry.valid ? "ready" : "changed"}  ${entry.destinationPath}`);
     }
     return;
   }

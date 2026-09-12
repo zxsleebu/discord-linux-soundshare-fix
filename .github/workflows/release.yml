@@ -21,9 +21,10 @@ jobs:
       - name: Package Linux x86_64 release
         run: |
           mkdir -p release/discord-linux-soundshare-fix/{bin,lib,runtime,dist}
-          cp bin/discord-soundshare-fix.mjs release/discord-linux-soundshare-fix/bin/
-          cp lib/installer.mjs release/discord-linux-soundshare-fix/lib/
-          cp runtime/register.cjs runtime/supported-builds.json release/discord-linux-soundshare-fix/runtime/
+          cp bin/*.mjs release/discord-linux-soundshare-fix/bin/
+          cp lib/*.mjs release/discord-linux-soundshare-fix/lib/
+          cp runtime/register.cjs runtime/indicator.cjs runtime/supported-builds.json release/discord-linux-soundshare-fix/runtime/
+          cp native/build/Release/discord_soundshare_fix_status.node release/discord-linux-soundshare-fix/dist/
           cp native/build/Release/discord_soundshare_fix.node release/discord-linux-soundshare-fix/dist/
           cp native/build/Release/discord_soundshare_fix_preload.so release/discord-linux-soundshare-fix/dist/libdiscord_soundshare_fix_preload.so
           cp native/build/Release/discord_soundshare_fix_inspect release/discord-linux-soundshare-fix/dist/

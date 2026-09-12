@@ -53,6 +53,12 @@ struct HookState {
   std::atomic<bool> installed{false};
   std::atomic<std::uint64_t> hit_count{0};
   std::atomic<std::uint64_t> blocked_count{0};
+  std::atomic<bool> failed{false};
+  std::string module_path;
+  const std::uint8_t* target = nullptr;
+  std::array<std::uint8_t, kMaximumPatchSize> patch{};
+  std::size_t patch_size = 0;
+  std::uintptr_t load_bias = 0;
   SignalOnSoundshareFn original = nullptr;
 };
 
@@ -430,6 +436,11 @@ bool InstallHook(const char* module_path, std::uintptr_t load_bias, std::string*
     return false;
   }
 
+  g_state.module_path = module_path;
+  g_state.target = target;
+  g_state.patch = patch;
+  g_state.patch_size = *patch_size;
+  g_state.load_bias = load_bias;
   g_state.installed.store(true, std::memory_order_release);
   Log(false, "active for %s (symbol 0x%llx, %zu-byte prologue)",
       module_path,
@@ -461,17 +472,39 @@ void TryInstallForHandle(const char* requested_path, void* handle) {
 
   struct link_map* map = nullptr;
   if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr) {
+    g_state.failed.store(true);
     Log(true, "cannot inspect loaded discord_voice.node: %s", dlerror());
     return;
   }
   const char* module_path = map->l_name != nullptr && map->l_name[0] != '\0' ? map->l_name : requested_path;
   std::string error;
   if (!InstallHook(module_path, static_cast<std::uintptr_t>(map->l_addr), &error)) {
+    g_state.failed.store(true);
     Log(true, "patch skipped safely: %s", error.c_str());
   }
 }
 
 }  // namespace
+
+// Read-only, versioned ABI. Never installs a hook or exposes addresses to JS.
+// 0 waiting, 1 active, 2 install failed, 3 disabled, 4 hook no longer intact.
+extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_status_v1(
+    std::uint64_t* hits, std::uint64_t* blocked) {
+  if (hits) *hits = g_state.hit_count.load(std::memory_order_relaxed);
+  if (blocked) *blocked = g_state.blocked_count.load(std::memory_order_relaxed);
+  if (Disabled()) return 3;
+  if (!g_state.installed.load(std::memory_order_acquire)) return g_state.failed.load() ? 2 : 0;
+  // Hold a loader reference while reading the code, even if another thread unloads it.
+  const auto real_dlopen = ResolveDlopen();
+  void* handle = real_dlopen ? real_dlopen(g_state.module_path.c_str(), RTLD_NOW | RTLD_NOLOAD) : nullptr;
+  if (!handle) return 4;
+  struct link_map* map = nullptr;
+  const bool intact = dlinfo(handle, RTLD_DI_LINKMAP, &map) == 0 && map &&
+      static_cast<std::uintptr_t>(map->l_addr) == g_state.load_bias &&
+      std::memcmp(g_state.target, g_state.patch.data(), g_state.patch_size) == 0;
+  dlclose(handle);
+  return intact ? 1 : 4;
+}
 
 extern "C" __attribute__((visibility("default"))) void* dlopen(const char* filename, int flags) {
   const DlopenFn real_dlopen = ResolveDlopen();

@@ -1,6 +1,13 @@
 {
   "targets": [
     {
+      "target_name": "discord_soundshare_fix_status",
+      "sources": ["status.cc"],
+      "cflags_cc": ["-std=c++20", "-Wall", "-Wextra"],
+      "defines": ["NAPI_VERSION=8"],
+      "libraries": ["-ldl"]
+    },
+    {
       "target_name": "discord_soundshare_fix",
       "sources": ["voice_hook.cc"],
       "cflags_cc": ["-std=c++20"],
