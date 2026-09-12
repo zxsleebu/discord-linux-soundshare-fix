@@ -25,6 +25,7 @@ const assert = require("node:assert/strict");
       window.indicatorTest = module.exports.mountIndicator({document, window, readStatus: () => window.statusFixture}); })();` });
     assert.equal(await page.locator('[data-soundshare-fix="indicator"]').count(), 1);
     assert.equal(await page.locator('[data-soundshare-fix]').getAttribute("data-state"), "active");
+    assert.equal(await page.locator('#share > [data-soundshare-fix]').count(), 1);
     const box = await page.locator("#share").boundingBox();
     await page.evaluate(() => { window.clicks = 0; document.querySelector("#share").addEventListener("click", () => window.clicks++); });
     await page.mouse.move(box.x + box.width - 5, box.y + 7);
@@ -47,12 +48,32 @@ const assert = require("node:assert/strict");
     assert.equal(await page.locator('[role="tooltip"]').evaluate((el) => getComputedStyle(el).visibility), "visible");
     await page.keyboard.press("Escape");
     assert.equal(await page.locator('[role="tooltip"]').evaluate((el) => getComputedStyle(el).visibility), "hidden");
-    await page.evaluate(() => { document.querySelector("#share").style.display = "none"; window.indicatorTest.refresh(); });
-    assert.equal(await page.locator('[data-soundshare-fix]').evaluate((el) => getComputedStyle(el).display), "none");
+    // Hide, refresh and reveal synchronously: no interval or pointer event may rescue visibility.
+    assert.equal(await page.evaluate(() => {
+      const panel = document.querySelector("main");
+      const dot = document.querySelector('[data-soundshare-fix]');
+      panel.style.opacity = "0";
+      window.indicatorTest.refresh();
+      const hidden = !dot.checkVisibility({ checkOpacity: true });
+      panel.style.opacity = "1";
+      return hidden && dot.checkVisibility({ checkOpacity: true });
+    }), true, "dot must follow panel opacity without waiting for refresh");
+    await page.evaluate(() => { document.querySelector('[data-soundshare-fix]').remove(); window.indicatorTest.refresh(); });
+    assert.equal(await page.locator('#share > [data-soundshare-fix]').count(), 1);
+    assert.equal(await page.evaluate(() => {
+      const button = document.querySelector("#share");
+      const dot = document.querySelector('[data-soundshare-fix]');
+      button.style.display = "none";
+      window.indicatorTest.refresh();
+      const hidden = !dot.checkVisibility();
+      button.style.display = "grid";
+      return hidden && dot.checkVisibility();
+    }), true, "dot must follow button display without waiting for refresh");
     await page.evaluate(() => window.indicatorTest.stop());
     assert.equal(await page.locator('[data-soundshare-fix]').count(), 0);
     assert.equal(await page.locator('[role="tooltip"]').count(), 0);
     assert.equal(await page.locator("#share").getAttribute("aria-describedby"), "existing");
+    assert.equal(await page.locator("#share").evaluate((el) => el.style.position), "");
     console.log("Browser checks passed: placement, tooltip, original click, state changes, keyboard, cleanup and rerender.");
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
