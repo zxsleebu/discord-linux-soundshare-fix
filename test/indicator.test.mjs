@@ -22,6 +22,12 @@ test("exact accessible button names, never substring or class guesses", () => {
     assert.equal(isShareButton({ getAttribute: () => name }), false);
   }
 });
+test("media-host ternary declaration from Discord 1.0.159+ is recognized", () => {
+  const ternary = `"use strict";\nconst RUN_MEDIA_HOST = false;\nconst VoiceEngine = RUN_MEDIA_HOST\n    ?\n        require('./MediaHost').default\n    :\n        require('./discord_voice.node');\nmodule.exports = VoiceEngine;\n`;
+  const patched = injectIndicator(ternary);
+  assert.match(patched, /require\('\.\/discord_voice\.node'\);\n\/\/ discord-soundshare-fix:indicator\n/);
+  assert.match(patched, /indicator:end\n\nmodule\.exports = VoiceEngine;/);
+});
 test("unknown module wrapper and unmanaged marker are rejected", () => {
   assert.throws(() => injectIndicator("unrecognized wrapper"));
   assert.throws(() => injectIndicator(injectIndicator(original)));

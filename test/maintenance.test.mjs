@@ -89,6 +89,13 @@ test("new version waits for stable files, then installs indicator; unchanged che
   assert.equal((await inspectIndicator(newer)).installed, true);
   assert.equal(notices.length, 2);
 });
+test("older installed build is also covered in case the updater rolls back", async (t) => {
+  const f = await fixture(t); const run = runner(f.config);
+  const older = await newVersion(f.options.homeDirectory, "1.0.156");
+  await run(1000); await run(5000);
+  assert.equal((await inspectIndicator(f.target)).installed, true);
+  assert.equal((await inspectIndicator(older)).installed, true);
+});
 test("ongoing updater writes reset the settle window", async (t) => {
   const f = await fixture(t); const run = runner(f.config);
   await run(0);
