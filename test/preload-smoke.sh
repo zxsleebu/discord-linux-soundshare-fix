@@ -17,9 +17,13 @@ preload_library="$project_directory/native/build/Release/discord_soundshare_fix_
 inspector="$project_directory/native/build/Release/discord_soundshare_fix_inspect"
 test -f "$preload_library"
 test -x "$inspector"
-"$inspector" "$preload_library" "$temporary_directory/discord_voice.node" | grep -q '^compatible'
+inspection=$("$inspector" "$preload_library" "$temporary_directory/discord_voice.node")
+printf '%s\n' "$inspection" | grep -q '^compatible'
+printf '%s\n' "$inspection" | grep -q '^ring-realign.compatible'
 LD_PRELOAD="$preload_library" "$temporary_directory/preload-loader" "$temporary_directory/discord_voice.node"
+DISCORD_SOUNDSHARE_FIX_RING_DISABLE=1 LD_PRELOAD="$preload_library" \
+  "$temporary_directory/preload-loader" "$temporary_directory/discord_voice.node" ring-disabled
 status_addon="$project_directory/native/build/Release/discord_soundshare_fix_status.node"
 env -u LD_PRELOAD node -e 'const s = require(process.argv[1]).readStatus(); if (s.state !== -1) process.exit(1)' "$status_addon"
-LD_PRELOAD="$preload_library" node -e 'const s = require(process.argv[1]).readStatus(); if (s.state !== 0 || s.hits !== 0 || s.blocked !== 0) process.exit(1)' "$status_addon"
+LD_PRELOAD="$preload_library" node -e 'const s = require(process.argv[1]).readStatus(); if (s.state !== 0 || s.hits !== 0 || s.blocked !== 0 || s.ringState !== 0 || s.realigned !== 0 || s.silentRestarts !== 0) process.exit(1)' "$status_addon"
 DISCORD_SOUNDSHARE_FIX_DISABLE=1 LD_PRELOAD="$preload_library" node -e 'if (require(process.argv[1]).readStatus().state !== 3) process.exit(1)' "$status_addon"

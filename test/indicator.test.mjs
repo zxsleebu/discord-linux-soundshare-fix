@@ -14,6 +14,21 @@ test("only a verified hook is green; missing telemetry is unknown", () => {
   assert.match(describeStatus({ state: 1, hits: 4, blocked: 1 }).text, /Signals: 4 · blocked restarts: 1/);
   assert.equal(describeStatus(null).kind, "unknown");
 });
+test("late-stream realignment adds a line without changing the dot", () => {
+  const active = describeStatus({ state: 1, hits: 4, blocked: 1, ringState: 1, realigned: 3 });
+  assert.equal(active.kind, "active");
+  assert.match(active.text, /\nLate streams realigned: 3$/);
+  const unsupported = describeStatus({ state: 1, hits: 4, blocked: 1, ringState: 2, realigned: 0 });
+  assert.equal(unsupported.kind, "active");
+  assert.match(unsupported.text, /Late-stream fix: unsupported build/);
+  assert.doesNotMatch(describeStatus({ state: 1, hits: 0, blocked: 0, ringState: 0 }).text, /Late/);
+  assert.doesNotMatch(describeStatus({ state: 1, hits: 0, blocked: 0 }).text, /Late/);
+});
+test("restarts let through after silence are counted when reported", () => {
+  assert.match(describeStatus({ state: 1, hits: 5, blocked: 1, silentRestarts: 2 }).text,
+    /blocked restarts: 1\nRestarts after silence: 2/);
+  assert.doesNotMatch(describeStatus({ state: 1, hits: 5, blocked: 1 }).text, /silence/);
+});
 test("exact accessible button names, never substring or class guesses", () => {
   for (const name of ["Stop Streaming", "Share Your Screen", "Остановить трансляцию"]) {
     assert.equal(isShareButton({ getAttribute: () => name }), true);

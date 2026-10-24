@@ -5,14 +5,31 @@
 [![Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-fcc624?logo=linux&logoColor=black)](#compatibility)
 
 Prevents Discord screen-share audio from dropping out when PipeWire or
-PulseAudio creates a new audio node on Linux.
+PulseAudio creates a new audio node on Linux, and from reaching viewers about a
+second late when an application's stream starts behind Discord's mixer.
 
 Discord normally treats every newly monitored sink input as a fresh successful
 soundshare start. That duplicate notification reaches
 `LocalUser::SignalOnSoundshare`, destroys the active WebRTC audio send stream,
 and creates it again. This fix makes only duplicate success notifications
-idempotent. The first start, every stop/failure, and Discord's original audio
-capture cadence remain unchanged.
+idempotent while audio is playing. The first start, every stop/failure, and
+Discord's original audio capture cadence remain unchanged.
+
+After at least 0.5 s in which Discord read no soundshare audio, a duplicate is
+forwarded again. Discord sends viewers no audio frames while every captured
+application is silent or paused; continuing the old send stream after such a
+gap was observed to leave viewers' audio one to two seconds behind the picture,
+typically when a video player was opened. Restarting during silence drops
+nothing, exactly as unpatched Discord does. Silence is detected by the
+late-stream hook below; on a build where that hook is unsupported, every
+duplicate is suppressed as before.
+
+Separately, Discord mixes every captured application into a one-second ring
+buffer. A stream that starts or resumes behind the reader is ignored by
+Discord's own bookkeeping and stays about one second late until it is paused
+again; a video player is the usual victim. The second hook moves such a stream
+to the reader, as Discord itself does when a stream is uncorked. See
+[late streams](#late-streams-in-the-soundshare-mixer).
 
 The default installer hooks Discord only in memory. It does not modify
 `discord_voice.node`, Discord's JavaScript, or any system file. The optional
@@ -40,8 +57,10 @@ Clicks still reach the original button, including **Stop Streaming**.
 - Grey: status is unavailable, including an older loaded library without telemetry.
 
 The tooltip reports signal calls and suppressed duplicate restarts in this renderer
-process, not just the current stream. Zero suppressed restarts is normal. Green does
-not prove audio quality, A/V sync, or delivery to viewers.
+process, not just the current stream. Zero suppressed restarts is normal. Further
+lines count restarts forwarded after silence and late streams moved back to the
+mixer's reader, or say why that hook is inactive; they never change the dot color. Green does not prove audio quality,
+A/V sync, or delivery to viewers.
 
 The UI uses a separate, read-only Node-API bridge to the already-loaded preload
 library. It does not install another hook, expose privileged APIs to the page,
@@ -208,6 +227,14 @@ The same resolver has been checked against:
 | --- | --- | --- |
 | Stable 1.0.156 | Linux x86_64 | Compatible, symbol `0x3bf110` |
 | Canary 1.0.1773 | Linux x86_64 | Compatible, symbol `0x3c14f0` |
+| Stable 1.0.164 | Linux x86_64 | Compatible, symbol `0x3ce1d0`; late-stream hook compatible |
+| Canary 1.0.2165 | Linux x86_64 | Compatible, symbol `0x3cda90`; late-stream hook compatible |
+
+The late-stream hook is stricter, because it reads Discord's mixer state.
+`PulseAudioController::ReadAvailable()` must match a byte template of the
+1.0.164 build; only the four controller field offsets and the
+`pa_stream_is_corked` call may differ, and those are read from its
+instructions. Any other difference disables just this hook.
 
 This cannot promise compatibility with an arbitrary future rewrite. If Discord
 removes local symbols, introduces an unsafe position-dependent prologue, or
@@ -225,8 +252,9 @@ node ./bin/discord-soundshare-fix.mjs uninstall
 Uninstall verifies the managed files, restores pre-existing user/autostart
 entries byte-for-byte, and removes generated overrides and the payload.
 
-Set `DISCORD_SOUNDSHARE_FIX_DISABLE=1` to load Discord without activating the
-hook. For runtime messages and the duplicate counter, launch once with:
+Set `DISCORD_SOUNDSHARE_FIX_DISABLE=1` to load Discord without activating either
+hook, or `DISCORD_SOUNDSHARE_FIX_RING_DISABLE=1` to keep only the restart fix.
+For runtime messages and the counters, launch once with:
 
 ```bash
 DISCORD_SOUNDSHARE_FIX_DEBUG=1 \
@@ -234,12 +262,25 @@ DISCORD_SOUNDSHARE_FIX_DEBUG=1 \
   /usr/bin/discord
 ```
 
-Release archives also contain an offline compatibility inspector:
+Release archives also contain an offline compatibility inspector. A second
+`ring-realign` line reports the late-stream hook; it does not change the exit
+status:
 
 ```bash
 ./dist/discord_soundshare_fix_inspect \
   ./dist/libdiscord_soundshare_fix_preload.so \
   ~/.config/discord/app-*/modules/discord_voice-*/discord_voice/discord_voice.node
+```
+
+To see the mixer itself, `scripts/soundshare-ring-snapshot.py` reads the running
+client's memory read-only and prints how far each captured application is from
+the reader. Reading another process needs root under the default
+`kernel.yama.ptrace_scope=1`. `--watch` keeps running and logs only stalls,
+bursts, late streams, stream changes and every restart the fix blocks or
+forwards after silence; press Enter to mark the moment you hear a delay:
+
+```bash
+sudo python3 scripts/soundshare-ring-snapshot.py --watch | tee -i ~/soundshare-ring.log
 ```
 
 ## Safety model
@@ -266,8 +307,29 @@ new PulseAudio sink input
 ```
 
 The preload hook tracks active `LocalUser` instances itself, so it does not rely
-on Discord's changing object layout. A duplicate `true` is suppressed; `false`
-removes that instance from the active set and is forwarded to Discord.
+on Discord's changing object layout. A duplicate `true` is suppressed unless no
+soundshare audio was available for 0.5 s; `false` removes that instance from the
+active set and is forwarded to Discord.
+
+## Late streams in the soundshare mixer
+
+`PulseAudioController` mixes every monitored sink input into one ring of 96000
+samples, one second of 48 kHz stereo. Each stream adds its samples at its own
+write counter; the reader copies 10 ms frames to WebRTC and stops at the slowest
+active stream, which `ReadAvailable()` computes as the smallest
+`write - read`. A new stream and an uncorked stream start at the current reader.
+
+That subtraction is unsigned. When a stream's counter ends up behind the reader,
+which was observed for players and notification sounds as they started, its
+distance wraps to a huge number and the stream is no longer considered. Its
+samples land in slots the reader reaches only after a full lap, so viewers hear
+that application roughly one second late, until the stream is corked and
+uncorked again. If every active stream is behind, the reader would never stop.
+
+Before Discord computes the minimum, the hook moves every active stream that is
+behind the reader up to the reader. It skips corked streams just as Discord does,
+and it changes only the counter with an atomic compare-and-swap. Samples the
+stream had already written behind the reader may still play once, a lap later.
 
 ## Credits
 

@@ -22,6 +22,30 @@ napi_value ReadStatus(napi_env env, napi_callback_info) {
       napi_set_named_property(env, result, "hits", value) != napi_ok) return nullptr;
   if (napi_create_double(env, static_cast<double>(blocked), &value) != napi_ok ||
       napi_set_named_property(env, result, "blocked", value) != napi_ok) return nullptr;
+
+  // Absent in libraries built before restarts were allowed after silence.
+  using SilentRestarts = std::uint64_t (*)();
+  void* silent_symbol = dlsym(RTLD_DEFAULT, "discord_soundshare_fix_silent_restarts_v1");
+  if (silent_symbol != nullptr) {
+    SilentRestarts silent_restarts = nullptr;
+    std::memcpy(&silent_restarts, &silent_symbol, sizeof(silent_restarts));
+    if (napi_create_double(env, static_cast<double>(silent_restarts()), &value) != napi_ok ||
+        napi_set_named_property(env, result, "silentRestarts", value) != napi_ok) return nullptr;
+  }
+
+  // Absent in libraries built before the late-stream realignment.
+  void* ring_symbol = dlsym(RTLD_DEFAULT, "discord_soundshare_fix_ring_status_v1");
+  if (ring_symbol == nullptr) return result;
+  Status ring_status = nullptr;
+  std::memcpy(&ring_status, &ring_symbol, sizeof(ring_status));
+  std::uint64_t realigned = 0, largest_gap = 0;
+  const int ring_state = ring_status(&realigned, &largest_gap);
+  if (napi_create_int32(env, ring_state, &value) != napi_ok ||
+      napi_set_named_property(env, result, "ringState", value) != napi_ok) return nullptr;
+  if (napi_create_double(env, static_cast<double>(realigned), &value) != napi_ok ||
+      napi_set_named_property(env, result, "realigned", value) != napi_ok) return nullptr;
+  if (napi_create_double(env, static_cast<double>(largest_gap), &value) != napi_ok ||
+      napi_set_named_property(env, result, "largestGap", value) != napi_ok) return nullptr;
   return result;
 }
 napi_value Init(napi_env env, napi_value exports) {

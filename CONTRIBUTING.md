@@ -12,3 +12,5 @@ Before submitting a compatibility update:
 
 Please keep changes focused. The project intentionally avoids altering Discord's
 PCM ring buffer, frame scheduler, encoder cadence, or unrelated voice behavior.
+The one exception is the late-stream hook, which only moves a stream's write
+counter that is already behind the reader; keep it that narrow.

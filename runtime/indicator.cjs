@@ -20,10 +20,19 @@ function describeStatus(status) {
   };
   const [kind, message] = states[status?.state] ?? ["unknown", "Status unavailable"];
   const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("en-US") : "?";
+  // The ring realignment is independent; it only adds a line and never turns the dot green.
+  const ring = {
+    1: `Late streams realigned: ${count(status?.realigned)}`,
+    2: "Late-stream fix: unsupported build",
+    3: "Late-stream fix: disabled",
+    4: "Late-stream fix: hook missing or modified",
+  }[status?.ringState];
   return {
     kind, color: COLORS[kind],
     text: `Soundshare Fix\n${message}` + (status?.state === 1
-      ? `\nSignals: ${count(status.hits)} · blocked restarts: ${count(status.blocked)}` : ""),
+      ? `\nSignals: ${count(status.hits)} · blocked restarts: ${count(status.blocked)}` +
+        (status.silentRestarts !== undefined ? `\nRestarts after silence: ${count(status.silentRestarts)}` : "") +
+        (ring ? `\n${ring}` : "") : ""),
   };
 }
 

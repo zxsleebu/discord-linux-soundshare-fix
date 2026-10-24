@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -33,17 +34,72 @@ namespace {
 
 constexpr std::string_view kVoiceModuleName = "discord_voice.node";
 constexpr std::string_view kSignalSymbol = "_ZN7discord5media9LocalUser18SignalOnSoundshareEb";
+constexpr std::string_view kReadAvailableSymbol =
+    "_ZN7discord5media10soundshare20PulseAudioController13ReadAvailableEv";
 constexpr std::size_t kAbsoluteJumpSize = 14;
 constexpr std::size_t kMaximumPatchSize = 48;
 constexpr std::size_t kTrampolineSize = 4096;
 
+// PulseAudioController::ReadAvailable() from Discord Stable 1.0.164. It returns
+// how many mixed bytes every active stream has written past the shared read
+// counter. The four controller offsets and the pa_stream_is_corked call are
+// read from the zeroed operands below; every other byte, including the libc++
+// map walk and the StreamContainer field offsets, must match exactly.
+constexpr std::array<std::uint8_t, 0xD2> kReadAvailableTemplate = {
+    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x4C,
+    0x8B, 0xBF, 0x00, 0x00, 0x00, 0x00, 0x4D, 0x85, 0xFF, 0x0F, 0x84, 0xA4,
+    0x00, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x4C, 0x8B, 0xA7, 0x00, 0x00, 0x00,
+    0x00, 0x4C, 0x8D, 0xAF, 0x00, 0x00, 0x00, 0x00, 0xBB, 0x40, 0x42, 0x0F,
+    0x00, 0x31, 0xED, 0x4D, 0x39, 0xEC, 0x75, 0x20, 0x4C, 0x39, 0xFD, 0xB8,
+    0x00, 0x00, 0x00, 0x00, 0x0F, 0x44, 0xD8, 0xE9, 0x79, 0x00, 0x00, 0x00,
+    0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x89, 0xC4, 0x4C,
+    0x39, 0xE8, 0x74, 0xE0, 0x49, 0x8B, 0x44, 0x24, 0x28, 0x83, 0x78, 0x0C,
+    0x00, 0x75, 0x0C, 0x48, 0x8B, 0x38, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x85,
+    0xC0, 0x74, 0x30, 0x48, 0xFF, 0xC5, 0x49, 0x8B, 0x4C, 0x24, 0x08, 0x48,
+    0x85, 0xC9, 0x74, 0x14, 0x0F, 0x1F, 0x40, 0x00, 0x48, 0x89, 0xC8, 0x48,
+    0x8B, 0x09, 0x48, 0x85, 0xC9, 0x75, 0xF5, 0xEB, 0xC3, 0x0F, 0x1F, 0x00,
+    0x49, 0x8B, 0x44, 0x24, 0x10, 0x4C, 0x39, 0x20, 0x49, 0x89, 0xC4, 0x75,
+    0xF3, 0xEB, 0xB1, 0x49, 0x8B, 0x44, 0x24, 0x28, 0x8B, 0x40, 0x10, 0x41,
+    0x8B, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x29, 0xC8, 0x48, 0x01, 0xC0, 0x89,
+    0xD9, 0x48, 0x39, 0xC8, 0x0F, 0x43, 0xC3, 0x89, 0xC3, 0xEB, 0xB3, 0x31,
+    0xDB, 0x89, 0xD8, 0x48, 0x83, 0xC4, 0x08, 0x5B, 0x41, 0x5C, 0x41, 0x5D,
+    0x41, 0x5E, 0x41, 0x5F, 0x5D, 0xC3,
+};
+constexpr std::size_t kMapSizeOperand = 0x0E;      // mov map_size(%rdi),%r15
+constexpr std::size_t kMapBeginOperand = 0x21;     // mov map_begin(%rdi),%r12
+constexpr std::size_t kMapEndOperand = 0x28;       // lea map_end(%rdi),%r13
+constexpr std::size_t kIsCorkedCall = 0x66;        // call pa_stream_is_corked
+constexpr std::size_t kReadCounterOperand = 0xAA;  // mov read_counter(%r14),%ecx
+// Fixed by the template: libc++ __tree node and Discord's StreamContainer.
+constexpr std::size_t kNodeLeft = 0x00;
+constexpr std::size_t kNodeRight = 0x08;
+constexpr std::size_t kNodeParent = 0x10;
+constexpr std::size_t kNodeValue = 0x28;
+constexpr std::size_t kContainerStream = 0x00;
+constexpr std::size_t kContainerCorked = 0x0C;
+constexpr std::size_t kContainerWrite = 0x10;
+constexpr std::uint64_t kMaximumStreams = 4096;
+constexpr std::size_t kMaximumTreeDepth = 64;
+// A duplicate start after this long without soundshare audio is forwarded.
+constexpr std::chrono::milliseconds kSilenceBeforeRestart{500};
+
 using DlopenFn = void* (*)(const char*, int);
 using SignalOnSoundshareFn = void (*)(void*, bool);
+using ReadAvailableFn = std::uint64_t (*)(void*);
+using StreamIsCorkedFn = int (*)(void*);
 
 struct SymbolLocation {
   std::uintptr_t virtual_address = 0;
   std::size_t file_offset = 0;
   std::size_t size = 0;
+};
+
+struct InlineHook {
+  std::string module_path;
+  const std::uint8_t* target = nullptr;
+  std::array<std::uint8_t, kMaximumPatchSize> patch{};
+  std::size_t patch_size = 0;
+  std::uintptr_t load_bias = 0;
 };
 
 struct HookState {
@@ -53,16 +109,34 @@ struct HookState {
   std::atomic<bool> installed{false};
   std::atomic<std::uint64_t> hit_count{0};
   std::atomic<std::uint64_t> blocked_count{0};
+  std::atomic<std::uint64_t> silent_restart_count{0};
   std::atomic<bool> failed{false};
-  std::string module_path;
-  const std::uint8_t* target = nullptr;
-  std::array<std::uint8_t, kMaximumPatchSize> patch{};
-  std::size_t patch_size = 0;
-  std::uintptr_t load_bias = 0;
+  InlineHook hook;
   SignalOnSoundshareFn original = nullptr;
 };
 
+struct RingLayout {
+  std::uint32_t map_size = 0;
+  std::uint32_t map_begin = 0;
+  std::uint32_t map_end = 0;
+  std::uint32_t read_counter = 0;
+  std::uintptr_t stream_is_corked = 0;  // link-time address of the called PLT entry
+};
+
+struct RingState {
+  std::atomic<bool> installed{false};
+  std::atomic<bool> failed{false};
+  std::atomic<std::uint64_t> realigned_count{0};
+  std::atomic<std::uint64_t> largest_gap{0};
+  std::atomic<std::int64_t> last_audio_ns{0};  // steady clock; 0 until audio was available
+  RingLayout layout;
+  StreamIsCorkedFn stream_is_corked = nullptr;
+  InlineHook hook;
+  ReadAvailableFn original = nullptr;
+};
+
 HookState g_state;
+RingState g_ring;
 
 bool DebugEnabled() {
   const char* value = std::getenv("DISCORD_SOUNDSHARE_FIX_DEBUG");
@@ -71,6 +145,11 @@ bool DebugEnabled() {
 
 bool Disabled() {
   const char* value = std::getenv("DISCORD_SOUNDSHARE_FIX_DISABLE");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+bool RingDisabled() {
+  const char* value = std::getenv("DISCORD_SOUNDSHARE_FIX_RING_DISABLE");
   return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
@@ -124,8 +203,10 @@ std::optional<std::vector<std::uint8_t>> ReadFile(const char* path, std::string*
   return bytes;
 }
 
-std::optional<SymbolLocation> FindSignalSymbol(
+std::optional<SymbolLocation> FindFunctionSymbol(
     const std::vector<std::uint8_t>& bytes,
+    std::string_view mangled_name,
+    const char* description,
     std::string* error) {
   const auto* header = ObjectAt<Elf64_Ehdr>(bytes, 0);
   if (header == nullptr || std::memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
@@ -168,7 +249,7 @@ std::optional<SymbolLocation> FindSignalSymbol(
       const char* name = strings + symbol.st_name;
       const std::size_t remaining = string_section.sh_size - symbol.st_name;
       const void* terminator = std::memchr(name, '\0', remaining);
-      if (terminator == nullptr || std::string_view(name) != kSignalSymbol) continue;
+      if (terminator == nullptr || std::string_view(name) != mangled_name) continue;
 
       const Elf64_Shdr& code_section = sections[symbol.st_shndx];
       if (symbol.st_value < code_section.sh_addr) break;
@@ -188,8 +269,79 @@ std::optional<SymbolLocation> FindSignalSymbol(
     }
   }
 
-  *error = "LocalUser::SignalOnSoundshare(bool) was not found in the ELF symbol table";
+  *error = std::string(description) + " was not found in the ELF symbol table";
   return std::nullopt;
+}
+
+bool IsExecutableAddress(const std::vector<std::uint8_t>& bytes, std::uintptr_t address) {
+  const auto* header = ObjectAt<Elf64_Ehdr>(bytes, 0);
+  if (header == nullptr) return false;
+  const auto* sections = ObjectAt<Elf64_Shdr>(bytes, header->e_shoff, header->e_shnum);
+  if (sections == nullptr) return false;
+  for (std::size_t index = 0; index < header->e_shnum; ++index) {
+    const Elf64_Shdr& section = sections[index];
+    if ((section.sh_flags & SHF_EXECINSTR) != 0 && address >= section.sh_addr &&
+        address - section.sh_addr < section.sh_size) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsReadAvailableOperand(std::size_t offset) {
+  for (const std::size_t operand :
+       {kMapSizeOperand, kMapBeginOperand, kMapEndOperand, kIsCorkedCall + 1, kReadCounterOperand}) {
+    if (offset >= operand && offset < operand + sizeof(std::int32_t)) return true;
+  }
+  return false;
+}
+
+std::optional<RingLayout> MatchReadAvailable(
+    const std::vector<std::uint8_t>& bytes,
+    const SymbolLocation& symbol,
+    std::string* error) {
+  if (symbol.size != kReadAvailableTemplate.size()) {
+    *error = "PulseAudioController::ReadAvailable() has an unknown size";
+    return std::nullopt;
+  }
+  const std::uint8_t* code = bytes.data() + symbol.file_offset;
+  for (std::size_t offset = 0; offset < kReadAvailableTemplate.size(); ++offset) {
+    if (!IsReadAvailableOperand(offset) && code[offset] != kReadAvailableTemplate[offset]) {
+      *error = "PulseAudioController::ReadAvailable() differs from the known build";
+      return std::nullopt;
+    }
+  }
+
+  const auto operand = [code](std::size_t offset) {
+    std::int32_t value = 0;
+    std::memcpy(&value, code + offset, sizeof(value));
+    return value;
+  };
+  const std::int32_t map_begin = operand(kMapBeginOperand);
+  const std::int32_t read_counter = operand(kReadCounterOperand);
+  // libc++ std::map stores {begin node, end node, size} contiguously.
+  if (map_begin <= 0 || map_begin % 8 != 0 || operand(kMapEndOperand) != map_begin + 8 ||
+      operand(kMapSizeOperand) != map_begin + 16 || read_counter <= 0 || read_counter % 4 != 0) {
+    *error = "PulseAudioController has an unexpected stream map layout";
+    return std::nullopt;
+  }
+
+  const std::intptr_t next_instruction =
+      static_cast<std::intptr_t>(symbol.virtual_address + kIsCorkedCall + 5);
+  const auto stream_is_corked =
+      static_cast<std::uintptr_t>(next_instruction + operand(kIsCorkedCall + 1));
+  if (!IsExecutableAddress(bytes, stream_is_corked)) {
+    *error = "PulseAudioController::ReadAvailable() calls outside discord_voice.node code";
+    return std::nullopt;
+  }
+
+  return RingLayout{
+      .map_size = static_cast<std::uint32_t>(map_begin + 16),
+      .map_begin = static_cast<std::uint32_t>(map_begin),
+      .map_end = static_cast<std::uint32_t>(map_begin + 8),
+      .read_counter = static_cast<std::uint32_t>(read_counter),
+      .stream_is_corked = stream_is_corked,
+  };
 }
 
 std::optional<std::size_t> DecodeModRm(
@@ -352,6 +504,23 @@ bool MakeWritable(void* address, std::size_t length, int protection, std::string
   return true;
 }
 
+std::int64_t SteadyNanoseconds() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// While nothing is played, Discord sends viewers no audio frames at all.
+// Continuing the same send stream after such a gap was observed to leave their
+// audio one to two seconds behind the picture. Unpatched Discord restarts the
+// stream when the next node appears; during silence that drops nothing, so it
+// is allowed then. Without the ring hook silence cannot be detected, and
+// duplicates stay suppressed.
+bool SoundshareSilent() {
+  if (!g_ring.installed.load(std::memory_order_acquire)) return false;
+  const std::int64_t silence = SteadyNanoseconds() - g_ring.last_audio_ns.load(std::memory_order_relaxed);
+  return silence >= std::chrono::nanoseconds(kSilenceBeforeRestart).count();
+}
+
 extern "C" void SignalOnSoundshareReplacement(void* local_user, bool success) {
   g_state.hit_count.fetch_add(1, std::memory_order_relaxed);
 
@@ -359,10 +528,15 @@ extern "C" void SignalOnSoundshareReplacement(void* local_user, bool success) {
     std::scoped_lock lock(g_state.users_mutex);
     if (success) {
       if (!g_state.active_users.insert(local_user).second) {
-        const std::uint64_t blocked = g_state.blocked_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        Log(false, "suppressed duplicate soundshare restart (%llu total)",
-            static_cast<unsigned long long>(blocked));
-        return;
+        if (!SoundshareSilent()) {
+          const std::uint64_t blocked = g_state.blocked_count.fetch_add(1, std::memory_order_relaxed) + 1;
+          Log(false, "suppressed duplicate soundshare restart (%llu total)",
+              static_cast<unsigned long long>(blocked));
+          return;
+        }
+        const std::uint64_t allowed = g_state.silent_restart_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        Log(false, "forwarded duplicate soundshare restart after silence (%llu total)",
+            static_cast<unsigned long long>(allowed));
       }
     } else {
       g_state.active_users.erase(local_user);
@@ -372,21 +546,102 @@ extern "C" void SignalOnSoundshareReplacement(void* local_user, bool success) {
   if (g_state.original != nullptr) g_state.original(local_user, success);
 }
 
-bool InstallHook(const char* module_path, std::uintptr_t load_bias, std::string* error) {
-  std::scoped_lock lock(g_state.install_mutex);
-  if (g_state.installed.load(std::memory_order_acquire)) return true;
+// Discord mutates the stream map and counters from its PulseAudio thread
+// without a lock; read them the way its own ReadAvailable() does.
+template <typename T>
+T LoadShared(const std::uint8_t* address) {
+  return std::atomic_ref<T>(*reinterpret_cast<T*>(const_cast<std::uint8_t*>(address)))
+      .load(std::memory_order_relaxed);
+}
 
-  const auto file = ReadFile(module_path, error);
-  if (!file) return false;
-  const auto symbol = FindSignalSymbol(*file, error);
-  if (!symbol) return false;
+// libc++ __tree_next_iter, bounded so a concurrently rebalanced tree cannot hang us.
+std::uint8_t* NextTreeNode(std::uint8_t* node) {
+  if (auto* right = LoadShared<std::uint8_t*>(node + kNodeRight)) {
+    node = right;
+    for (std::size_t depth = 0; depth < kMaximumTreeDepth; ++depth) {
+      auto* left = LoadShared<std::uint8_t*>(node + kNodeLeft);
+      if (left == nullptr) return node;
+      node = left;
+    }
+    return nullptr;
+  }
+  for (std::size_t depth = 0; depth < kMaximumTreeDepth; ++depth) {
+    auto* parent = LoadShared<std::uint8_t*>(node + kNodeParent);
+    if (parent == nullptr) return nullptr;
+    if (LoadShared<std::uint8_t*>(parent + kNodeLeft) == node) return parent;
+    node = parent;
+  }
+  return nullptr;
+}
 
-  const std::size_t available = std::min(symbol->size, kMaximumPatchSize);
-  const auto patch_size = FindSafePatchSize(file->data() + symbol->file_offset, available, error);
+void RecordRealignment(std::uint32_t gap) {
+  const std::uint64_t count = g_ring.realigned_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  std::uint64_t largest = g_ring.largest_gap.load(std::memory_order_relaxed);
+  while (gap > largest &&
+         !g_ring.largest_gap.compare_exchange_weak(largest, gap, std::memory_order_relaxed)) {
+  }
+  Log(false, "moved a soundshare stream %u samples forward to the reader (%llu total)",
+      gap, static_cast<unsigned long long>(count));
+}
+
+// Every stream writes into one ring at its own counter, and the reader stops at
+// the slowest active stream. ReadAvailable() ignores a stream whose counter is
+// already behind the reader, so its audio lands where the reader returns only
+// after a full lap, about one second later, until the stream is corked again.
+// Move such a stream to the reader, as Discord itself does on uncork.
+void RealignStreamsBehindReader(std::uint8_t* controller) {
+  const RingLayout& layout = g_ring.layout;
+  const auto size = LoadShared<std::uint64_t>(controller + layout.map_size);
+  if (size == 0 || size > kMaximumStreams) return;
+  const std::uint32_t read = LoadShared<std::uint32_t>(controller + layout.read_counter);
+  const std::uint8_t* end = controller + layout.map_end;
+  auto* node = LoadShared<std::uint8_t*>(controller + layout.map_begin);
+
+  for (std::uint64_t index = 0; index < size && node != nullptr && node != end; ++index) {
+    auto* container = LoadShared<std::uint8_t*>(node + kNodeValue);
+    if (container != nullptr && LoadShared<std::uint32_t>(container + kContainerCorked) == 0 &&
+        g_ring.stream_is_corked(LoadShared<void*>(container + kContainerStream)) == 0) {
+      std::atomic_ref<std::uint32_t> write(*reinterpret_cast<std::uint32_t*>(container + kContainerWrite));
+      std::uint32_t current = write.load(std::memory_order_relaxed);
+      // The PulseAudio thread advances the counter one sample at a time; give up
+      // after a few races and retry on the next call instead of spinning.
+      for (int attempt = 0; attempt < 8 && static_cast<std::int32_t>(current - read) < 0; ++attempt) {
+        if (write.compare_exchange_weak(current, read, std::memory_order_relaxed)) {
+          RecordRealignment(read - current);
+          break;
+        }
+      }
+    }
+    node = NextTreeNode(node);
+  }
+}
+
+extern "C" std::uint64_t ReadAvailableReplacement(void* controller) {
+  if (controller != nullptr) RealignStreamsBehindReader(static_cast<std::uint8_t*>(controller));
+  const std::uint64_t available = g_ring.original(controller);
+  if (available != 0) g_ring.last_audio_ns.store(SteadyNanoseconds(), std::memory_order_relaxed);
+  return available;
+}
+
+// Redirects |symbol| to |replacement|. |original| receives a trampoline that
+// runs the relocated prologue and continues in Discord's function; it is set
+// before the jump is written so the replacement never sees it unset.
+template <typename Fn>
+bool InstallInlineHook(
+    const std::vector<std::uint8_t>& file,
+    const SymbolLocation& symbol,
+    const char* module_path,
+    std::uintptr_t load_bias,
+    Fn replacement,
+    Fn* original,
+    InlineHook* hook,
+    std::string* error) {
+  const std::size_t available = std::min(symbol.size, kMaximumPatchSize);
+  const auto patch_size = FindSafePatchSize(file.data() + symbol.file_offset, available, error);
   if (!patch_size) return false;
 
-  auto* target = reinterpret_cast<std::uint8_t*>(load_bias + symbol->virtual_address);
-  if (std::memcmp(target, file->data() + symbol->file_offset, *patch_size) != 0) {
+  auto* target = reinterpret_cast<std::uint8_t*>(load_bias + symbol.virtual_address);
+  if (std::memcmp(target, file.data() + symbol.file_offset, *patch_size) != 0) {
     *error = "loaded function bytes do not match discord_voice.node on disk";
     return false;
   }
@@ -417,35 +672,78 @@ bool InstallHook(const char* module_path, std::uintptr_t load_bias, std::string*
       reinterpret_cast<char*>(trampoline_bytes),
       reinterpret_cast<char*>(trampoline_bytes + *patch_size + kAbsoluteJumpSize));
 
-  g_state.original = reinterpret_cast<SignalOnSoundshareFn>(trampoline);
+  *original = reinterpret_cast<Fn>(trampoline);
   if (!MakeWritable(target, *patch_size, PROT_READ | PROT_WRITE | PROT_EXEC, error)) {
-    g_state.original = nullptr;
+    *original = nullptr;
     munmap(trampoline, kTrampolineSize);
     return false;
   }
   std::array<std::uint8_t, kMaximumPatchSize> patch{};
   patch.fill(0x90);
-  WriteAbsoluteJump(patch.data(), reinterpret_cast<std::uintptr_t>(&SignalOnSoundshareReplacement));
+  WriteAbsoluteJump(patch.data(), reinterpret_cast<std::uintptr_t>(replacement));
   std::memcpy(target, patch.data(), *patch_size);
   __builtin___clear_cache(reinterpret_cast<char*>(target), reinterpret_cast<char*>(target + *patch_size));
   if (!MakeWritable(target, *patch_size, PROT_READ | PROT_EXEC, error)) {
-    std::memcpy(target, file->data() + symbol->file_offset, *patch_size);
+    std::memcpy(target, file.data() + symbol.file_offset, *patch_size);
     __builtin___clear_cache(reinterpret_cast<char*>(target), reinterpret_cast<char*>(target + *patch_size));
-    g_state.original = nullptr;
+    *original = nullptr;
     munmap(trampoline, kTrampolineSize);
     return false;
   }
 
-  g_state.module_path = module_path;
-  g_state.target = target;
-  g_state.patch = patch;
-  g_state.patch_size = *patch_size;
-  g_state.load_bias = load_bias;
+  hook->module_path = module_path;
+  hook->target = target;
+  hook->patch = patch;
+  hook->patch_size = *patch_size;
+  hook->load_bias = load_bias;
+  return true;
+}
+
+bool InstallSignalHook(
+    const std::vector<std::uint8_t>& file,
+    const char* module_path,
+    std::uintptr_t load_bias,
+    std::string* error) {
+  const auto symbol = FindFunctionSymbol(file, kSignalSymbol, "LocalUser::SignalOnSoundshare(bool)", error);
+  if (!symbol) return false;
+  if (!InstallInlineHook(file, *symbol, module_path, load_bias, &SignalOnSoundshareReplacement,
+                         &g_state.original, &g_state.hook, error)) {
+    return false;
+  }
   g_state.installed.store(true, std::memory_order_release);
   Log(false, "active for %s (symbol 0x%llx, %zu-byte prologue)",
       module_path,
       static_cast<unsigned long long>(symbol->virtual_address),
-      *patch_size);
+      g_state.hook.patch_size);
+  return true;
+}
+
+bool InstallRingHook(
+    const std::vector<std::uint8_t>& file,
+    const char* module_path,
+    std::uintptr_t load_bias,
+    std::string* error) {
+  const auto symbol = FindFunctionSymbol(
+      file, kReadAvailableSymbol, "PulseAudioController::ReadAvailable()", error);
+  if (!symbol) return false;
+  const auto layout = MatchReadAvailable(file, *symbol, error);
+  if (!layout) return false;
+  // The template only describes the file; the replacement also relies on the loaded copy.
+  if (std::memcmp(reinterpret_cast<const void*>(load_bias + symbol->virtual_address),
+                  file.data() + symbol->file_offset, symbol->size) != 0) {
+    *error = "loaded PulseAudioController::ReadAvailable() does not match discord_voice.node on disk";
+    return false;
+  }
+
+  g_ring.layout = *layout;
+  g_ring.stream_is_corked = reinterpret_cast<StreamIsCorkedFn>(load_bias + layout->stream_is_corked);
+  if (!InstallInlineHook(file, *symbol, module_path, load_bias, &ReadAvailableReplacement,
+                         &g_ring.original, &g_ring.hook, error)) {
+    return false;
+  }
+  g_ring.installed.store(true, std::memory_order_release);
+  Log(false, "late soundshare streams are realigned (symbol 0x%llx)",
+      static_cast<unsigned long long>(symbol->virtual_address));
   return true;
 }
 
@@ -467,8 +765,26 @@ DlopenFn ResolveDlopen() {
   return real_dlopen;
 }
 
+// Holds a loader reference while reading the code, even if another thread unloads it.
+bool HookIntact(const InlineHook& hook) {
+  const auto real_dlopen = ResolveDlopen();
+  void* handle = real_dlopen ? real_dlopen(hook.module_path.c_str(), RTLD_NOW | RTLD_NOLOAD) : nullptr;
+  if (!handle) return false;
+  struct link_map* map = nullptr;
+  const bool intact = dlinfo(handle, RTLD_DI_LINKMAP, &map) == 0 && map &&
+      static_cast<std::uintptr_t>(map->l_addr) == hook.load_bias &&
+      std::memcmp(hook.target, hook.patch.data(), hook.patch_size) == 0;
+  dlclose(handle);
+  return intact;
+}
+
 void TryInstallForHandle(const char* requested_path, void* handle) {
   if (handle == nullptr || Disabled()) return;
+
+  std::scoped_lock lock(g_state.install_mutex);
+  const bool want_ring = !g_ring.installed.load(std::memory_order_acquire) &&
+      !g_ring.failed.load() && !RingDisabled();
+  if (g_state.installed.load(std::memory_order_acquire) && !want_ring) return;
 
   struct link_map* map = nullptr;
   if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr) {
@@ -477,10 +793,26 @@ void TryInstallForHandle(const char* requested_path, void* handle) {
     return;
   }
   const char* module_path = map->l_name != nullptr && map->l_name[0] != '\0' ? map->l_name : requested_path;
+  const auto load_bias = static_cast<std::uintptr_t>(map->l_addr);
   std::string error;
-  if (!InstallHook(module_path, static_cast<std::uintptr_t>(map->l_addr), &error)) {
+  const auto file = ReadFile(module_path, &error);
+  if (!file) {
+    if (!g_state.installed.load(std::memory_order_acquire)) g_state.failed.store(true);
+    if (want_ring) g_ring.failed.store(true);
+    Log(true, "patch skipped safely: %s", error.c_str());
+    return;
+  }
+
+  if (!g_state.installed.load(std::memory_order_acquire) &&
+      !InstallSignalHook(*file, module_path, load_bias, &error)) {
     g_state.failed.store(true);
     Log(true, "patch skipped safely: %s", error.c_str());
+  }
+  // Independent of the restart fix: an unknown ReadAvailable() leaves it working.
+  error.clear();
+  if (want_ring && !InstallRingHook(*file, module_path, load_bias, &error)) {
+    g_ring.failed.store(true);
+    Log(true, "late-stream realignment skipped safely: %s", error.c_str());
   }
 }
 
@@ -494,16 +826,26 @@ extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_sta
   if (blocked) *blocked = g_state.blocked_count.load(std::memory_order_relaxed);
   if (Disabled()) return 3;
   if (!g_state.installed.load(std::memory_order_acquire)) return g_state.failed.load() ? 2 : 0;
-  // Hold a loader reference while reading the code, even if another thread unloads it.
-  const auto real_dlopen = ResolveDlopen();
-  void* handle = real_dlopen ? real_dlopen(g_state.module_path.c_str(), RTLD_NOW | RTLD_NOLOAD) : nullptr;
-  if (!handle) return 4;
-  struct link_map* map = nullptr;
-  const bool intact = dlinfo(handle, RTLD_DI_LINKMAP, &map) == 0 && map &&
-      static_cast<std::uintptr_t>(map->l_addr) == g_state.load_bias &&
-      std::memcmp(g_state.target, g_state.patch.data(), g_state.patch_size) == 0;
-  dlclose(handle);
-  return intact ? 1 : 4;
+  return HookIntact(g_state.hook) ? 1 : 4;
+}
+
+// Read-only: duplicate starts forwarded because no soundshare audio was read for
+// kSilenceBeforeRestart.
+extern "C" __attribute__((visibility("default"))) std::uint64_t discord_soundshare_fix_silent_restarts_v1() {
+  return g_state.silent_restart_count.load(std::memory_order_relaxed);
+}
+
+// Read-only, versioned ABI for the late-stream realignment. |largest_gap| is in
+// interleaved samples (96 per millisecond at Discord's 48 kHz stereo).
+// 0 waiting, 1 active, 2 unsupported build or install failed, 3 disabled,
+// 4 hook no longer intact.
+extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_ring_status_v1(
+    std::uint64_t* realigned, std::uint64_t* largest_gap) {
+  if (realigned) *realigned = g_ring.realigned_count.load(std::memory_order_relaxed);
+  if (largest_gap) *largest_gap = g_ring.largest_gap.load(std::memory_order_relaxed);
+  if (Disabled() || RingDisabled()) return 3;
+  if (!g_ring.installed.load(std::memory_order_acquire)) return g_ring.failed.load() ? 2 : 0;
+  return HookIntact(g_ring.hook) ? 1 : 4;
 }
 
 extern "C" __attribute__((visibility("default"))) void* dlopen(const char* filename, int flags) {
@@ -529,7 +871,7 @@ extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_ins
   } else {
     const auto file = ReadFile(module_path, &error);
     if (file) {
-      const auto symbol = FindSignalSymbol(*file, &error);
+      const auto symbol = FindFunctionSymbol(*file, kSignalSymbol, "LocalUser::SignalOnSoundshare(bool)", &error);
       if (symbol) {
         const auto decoded = FindSafePatchSize(
             file->data() + symbol->file_offset,
@@ -542,6 +884,31 @@ extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_ins
           return 0;
         }
       }
+    }
+  }
+
+  if (error_buffer != nullptr && error_buffer_size > 0) {
+    std::snprintf(error_buffer, error_buffer_size, "%s", error.c_str());
+  }
+  return 1;
+}
+
+// Offline check for the late-stream realignment; 0 when the build is supported.
+extern "C" __attribute__((visibility("default"))) int discord_soundshare_fix_inspect_ring(
+    const char* module_path,
+    char* error_buffer,
+    std::size_t error_buffer_size) {
+  std::string error;
+  if (module_path == nullptr) {
+    error = "module path is missing";
+  } else if (const auto file = ReadFile(module_path, &error)) {
+    const auto symbol = FindFunctionSymbol(
+        *file, kReadAvailableSymbol, "PulseAudioController::ReadAvailable()", &error);
+    if (symbol && MatchReadAvailable(*file, *symbol, &error) &&
+        FindSafePatchSize(file->data() + symbol->file_offset,
+                          std::min(symbol->size, kMaximumPatchSize), &error)) {
+      if (error_buffer != nullptr && error_buffer_size > 0) error_buffer[0] = '\0';
+      return 0;
     }
   }
 
