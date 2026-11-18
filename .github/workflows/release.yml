@@ -20,8 +20,9 @@ jobs:
       - run: npm run verify
       - name: Package Linux x86_64 release
         run: |
-          mkdir -p release/discord-linux-soundshare-fix/{bin,lib,runtime,dist}
+          mkdir -p release/discord-linux-soundshare-fix/{bin,lib,runtime,dist,scripts}
           cp bin/*.mjs release/discord-linux-soundshare-fix/bin/
+          cp scripts/soundshare-ring-snapshot.py release/discord-linux-soundshare-fix/scripts/
           cp lib/*.mjs release/discord-linux-soundshare-fix/lib/
           cp runtime/register.cjs runtime/indicator.cjs runtime/supported-builds.json release/discord-linux-soundshare-fix/runtime/
           cp native/build/Release/discord_soundshare_fix_status.node release/discord-linux-soundshare-fix/dist/
